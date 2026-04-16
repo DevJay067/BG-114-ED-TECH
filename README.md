@@ -1,20 +1,35 @@
 
-# React + Vite
+EduSkill (Edutech-Web-1)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Overview
 
-Currently, two official plugins are available:
+EduSkill is a web-based learning and productivity platform designed to help students organize their studies, track progress, and improve their skills through structured planning and practice.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Features
 
-## React Compiler
+- User authentication interface (Login and Signup)
+- Dashboard with performance statistics
+- Progress tracking system
+- Goal management functionality
+- Study planner with session tracking
+- Practice section for problem-solving
+- User profile management
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Technology Stack
 
-## Expanding the ESLint configuration
+- HTML
+- CSS
+- JavaScript
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Current Status
 
-# Edutech-Web-1
+This is a frontend-only application. All data is managed locally and resets on refresh. Backend integration is not yet implemented.
+
+Future Enhancements
+
+- Backend integration using Node.js or Firebase
+- Database for persistent storage
+- Real-time data updates and analytics
+- Secure authentication using JWT or OAuth
+- Personalized recommendations
 

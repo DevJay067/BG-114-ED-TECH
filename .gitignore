@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Firebase — NEVER commit these
+server/serviceAccountKey.json
+server/.env
+firebase-config.js

@@ -1,4 +1,126 @@
+// ============================================================
+// --- Firebase API Client Layer --- //
+// ============================================================
+const API_BASE = 'http://localhost:5000/api';
+
+/**
+ * Makes an authenticated API call using the current Firebase user's ID token.
+ * Automatically injects Authorization: Bearer <token> header.
+ */
+async function apiCall(method, endpoint, body = null) {
+  try {
+    const user = firebaseAuth.currentUser;
+    if (!user) throw new Error('Not authenticated');
+
+    const token = await user.getIdToken();
+
+    const options = {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+    };
+
+    if (body && method !== 'GET') {
+      options.body = JSON.stringify(body);
+    }
+
+    const res = await fetch(`${API_BASE}${endpoint}`, options);
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.error || `API error: ${res.status}`);
+    }
+
+    return data;
+  } catch (err) {
+    console.error(`API [${method} ${endpoint}]:`, err.message);
+    throw err;
+  }
+}
+
+/**
+ * Loads all user data from the backend and populates state.
+ * Called once after login/signup.
+ */
+async function loadAppData() {
+  try {
+    const [dashData, goalsData, sessionsData, notifsData] = await Promise.all([
+      apiCall('GET', '/dashboard'),
+      apiCall('GET', '/goals'),
+      apiCall('GET', '/sessions'),
+      apiCall('GET', '/notifications'),
+    ]);
+
+    // Populate state from API responses
+    if (dashData.user) {
+      state.user = {
+        name: dashData.user.name || state.user.name,
+        email: dashData.user.email || state.user.email,
+        avatar: dashData.user.avatar || null,
+        skillLevel: dashData.user.skillLevel || 'Beginner',
+        interests: dashData.user.interests || [],
+        streak: dashData.stats.streak || 0,
+        totalHours: dashData.stats.totalHours || 0,
+        joinDate: dashData.user.joinDate ? new Date(dashData.user.joinDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : 'Unknown',
+      };
+      if (dashData.user.theme) state.theme = dashData.user.theme;
+    }
+
+    if (dashData.weeklyData) {
+      // Update weeklyData constant with real API data
+      weeklyData.length = 0;
+      dashData.weeklyData.forEach(d => weeklyData.push({ day: d.day, hours: d.hours }));
+    }
+
+    if (dashData.subjectProgress) {
+      state.progress = dashData.subjectProgress;
+    }
+
+    if (goalsData.goals) {
+      state.goals = goalsData.goals.map(g => ({ id: g.id, text: g.text, done: g.done }));
+    }
+
+    if (sessionsData.sessions) {
+      state.sessions = sessionsData.sessions.map(s => ({
+        id: s.id, date: s.date, subject: s.subject, duration: s.duration
+      }));
+    }
+
+    if (notifsData.notifications) {
+      state.notifications = notifsData.notifications.map(n => ({
+        id: n.id, text: n.text, time: n.time || 'recently', read: n.read
+      }));
+    }
+
+  } catch (err) {
+    console.warn('Could not load data from backend. Running in offline mode.', err.message);
+    toast('Running in offline mode — backend not connected', 'info');
+  }
+}
+
+/**
+ * Resets the application state to default/blank values.
+ * Called on sign-out.
+ */
+function clearAppData() {
+    state.user = {
+        name: 'Guest', email: '', avatar: null,
+        skillLevel: 'Beginner', interests: [],
+        streak: 0, totalHours: 0, joinDate: ''
+    };
+    state.goals = [];
+    state.totalSolved = 0;
+    state.sessions = [];
+    state.notifications = [];
+    state.progress = { Math: 0, Science: 0, Coding: 0, English: 0, History: 0 };
+    state.activeSection = 'dashboard';
+}
+
+// ============================================================
 // --- Constants & dummy Data --- //
+
 const weeklyData = [
   { day: 'Mon', hours: 2.5 },
   { day: 'Tue', hours: 3.2 },
@@ -37,24 +159,15 @@ const state = {
   activeSection: 'dashboard',
   mobileOpen: false,
   user: {
-      name: 'Alex Johnson', email: 'alex@example.com', avatar: null,
-      skillLevel: 'Intermediate', interests: ['Web Dev', 'AI', 'Data Science'],
-      streak: 7, totalHours: 142, joinDate: 'Jan 2025'
+      name: 'Loading...', email: '', avatar: null,
+      skillLevel: 'Beginner', interests: [],
+      streak: 0, totalHours: 0, joinDate: ''
   },
-  goals: [
-      { id: 1, text: 'Complete React course', done: true },
-      { id: 2, text: 'Solve 20 DSA problems', done: false },
-      { id: 3, text: 'Build portfolio project', done: false },
-  ],
-  progress: { Math: 72, Science: 58, Coding: 85, English: 45, History: 30 },
-  notifications: [
-      { id: 1, text: 'You completed 1 task today', time: '2m ago', read: false },
-      { id: 2, text: 'Keep going! 7-day streak active', time: '1h ago', read: false },
-  ],
-  sessions: [
-      { date: '2025-04-01', subject: 'Coding', duration: 90 },
-      { date: '2025-04-04', subject: 'Coding', duration: 120 },
-  ],
+  goals: [],
+  totalSolved: 0,
+  progress: { Math: 0, Science: 0, Coding: 0, English: 0, History: 0 },
+  notifications: [],
+  sessions: [],
   // Temp states for forms
   loginForm: { email: '', password: '', show: false, loading: false },
   signupForm: { name: '', email: '', password: '', show: false, loading: false, selectedInterests: ['Web Dev', 'AI'], level: 'Intermediate' },
@@ -63,20 +176,62 @@ const state = {
   plannerForm: { date: '', subject: 'Coding', duration: 60, modalOpen: false },
   profileForm: { editing: false, name: '', email: '', skillLevel: '', interests: [] },
   practiceForm: { input: '', submitted: false },
-  navbar: { showNotif: false }
+  navbar: { showNotif: false },
 };
 
 let chartInstance = null;
 let progressChartInstance = null;
 
 // --- Utilities & Engine --- //
+/**
+ * Displays a premium floating toast notification.
+ */
 function toast(msg, type = 'success') {
     const container = document.getElementById('toast-container');
+    if (!container) return;
+
     const el = document.createElement('div');
-    el.className = `toast flex items-start gap-2`;
-    el.innerHTML = `<span>${type === 'error' ? '❌' : (type==='info'?'ℹ️':'✅')}</span><span>${msg}</span>`;
+    el.className = `toast`;
+    
+    let icon = 'check-circle';
+    let iconColor = 'text-emerald-400';
+    if (type === 'error') { icon = 'alert-circle'; iconColor = 'text-red-400'; }
+    if (type === 'info') { icon = 'info'; iconColor = 'text-cyan-400'; }
+
+    el.innerHTML = `
+        <i data-lucide="${icon}" class="${iconColor} w-5 h-5"></i>
+        <span>${msg}</span>
+    `;
+    
     container.appendChild(el);
-    setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 3000);
+    if (window.lucide) lucide.createIcons({ props: { className: iconColor } });
+
+    // Auto-remove after animation completes
+    setTimeout(() => { 
+        if (el.parentNode) el.parentNode.removeChild(el); 
+    }, 3200);
+}
+
+/**
+ * Shows a large, celebratory center-screen popup for major achievements.
+ */
+function showMilestone(title, msg, icon = 'trophy') {
+    const overlay = document.createElement('div');
+    overlay.className = 'milestone-overlay';
+    overlay.innerHTML = `
+        <div class="milestone-card">
+            <div class="w-20 h-20 rounded-full bg-indigo-500/20 flex items-center justify-center mx-auto mb-6">
+                <i data-lucide="${icon}" class="text-indigo-400 w-10 h-10"></i>
+            </div>
+            <h2 class="text-2xl font-bold text-white mb-2">${title}</h2>
+            <p class="text-slate-300 mb-8">${msg}</p>
+            <button onclick="this.closest('.milestone-overlay').remove()" class="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-2xl transition-all shadow-lg shadow-indigo-600/20">
+                Continue
+            </button>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+    if (window.lucide) lucide.createIcons();
 }
 
 function updateTheme() {
@@ -226,10 +381,11 @@ function renderDashboard() {
     const user = state.user;
     
     let statsHtml = `
-      ${Card("p-4", `<div class="w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center mb-3"><i data-lucide="clock" class="text-indigo-500 w-4 h-4"></i></div><p class="text-xl font-bold text-slate-800 dark:text-white">142h</p><p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Total Hours</p>`)}
+      ${Card("p-4", `<div class="w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center mb-3"><i data-lucide="clock" class="text-indigo-500 w-4 h-4"></i></div><p class="text-xl font-bold text-slate-800 dark:text-white">${user.totalHours}h</p><p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Total Hours</p>`)}
       ${Card("p-4", `<div class="w-9 h-9 rounded-xl bg-orange-500/10 flex items-center justify-center mb-3"><i data-lucide="flame" class="text-orange-500 w-4 h-4"></i></div><p class="text-xl font-bold text-slate-800 dark:text-white">${user.streak} days</p><p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Day Streak</p>`)}
-      ${Card("p-4", `<div class="w-9 h-9 rounded-xl bg-emerald-500/10 flex items-center justify-center mb-3"><i data-lucide="target" class="text-emerald-500 w-4 h-4"></i></div><p class="text-xl font-bold text-slate-800 dark:text-white">2 / 4</p><p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Goals Done</p>`)}
-      ${Card("p-4", `<div class="w-9 h-9 rounded-xl bg-cyan-500/10 flex items-center justify-center mb-3"><i data-lucide="trending-up" class="text-cyan-500 w-4 h-4"></i></div><p class="text-xl font-bold text-slate-800 dark:text-white">58%</p><p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Avg Score</p>`)}
+      ${Card("p-4", `<div class="w-9 h-9 rounded-xl bg-emerald-500/10 flex items-center justify-center mb-3"><i data-lucide="target" class="text-emerald-500 w-4 h-4"></i></div><p class="text-xl font-bold text-slate-800 dark:text-white">${state.goals.filter(g=>g.done).length} / ${state.goals.length}</p><p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Goals Done</p>`)}
+      ${Card("p-4", `<div class="w-9 h-9 rounded-xl bg-purple-500/10 flex items-center justify-center mb-3"><i data-lucide="code" class="text-purple-500 w-4 h-4"></i></div><p class="text-xl font-bold text-slate-800 dark:text-white">${state.totalSolved}</p><p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Solved</p>`)}
+      ${Card("p-4", `<div class="w-9 h-9 rounded-xl bg-cyan-500/10 flex items-center justify-center mb-3"><i data-lucide="trending-up" class="text-cyan-500 w-4 h-4"></i></div><p class="text-xl font-bold text-slate-800 dark:text-white">${Object.values(state.progress).length ? Math.round(Object.values(state.progress).reduce((a,b)=>a+b,0)/Object.values(state.progress).length) : 0}%</p><p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Avg Score</p>`)}
     `;
 
     let skillsHtml = recommendedSkills.map(s => `
@@ -265,7 +421,7 @@ function renderDashboard() {
         ${Card("p-5 border-l-4 border-l-indigo-500", `<p class="text-slate-600 dark:text-slate-300 italic text-sm leading-relaxed">"Success is the sum of small efforts repeated daily."</p><p class="text-xs text-slate-400 mt-2">— Robert Collier</p>`)}
       </div>
       
-      <div class="fade-up delay-10 grid grid-cols-2 lg:grid-cols-4 gap-4">${statsHtml}</div>
+      <div class="fade-up delay-10 grid grid-cols-2 lg:grid-cols-5 gap-4">${statsHtml}</div>
       
       <!-- Weekly chart -->
       <div class="fade-up delay-15">
@@ -305,7 +461,7 @@ function renderProgress() {
                 <span class="text-sm font-medium text-slate-700 dark:text-slate-300">${sub}</span>
                 <span class="text-sm font-bold" style="color: ${color}">${val}%</span>
               </div>
-              <input type="range" min="0" max="100" value="${val}" oninput="state.progress['${sub}']=parseInt(this.value); document.getElementById('root').innerHTML = renderAppLayout(); initAfterRender(); lucide.createIcons();" class="w-full h-2 rounded-full appearance-none cursor-pointer" style="accent-color: ${color}">
+              <input type="range" min="0" max="100" value="${val}" oninput="updateProgressSlider('${sub}', parseInt(this.value))" class="w-full h-2 rounded-full appearance-none cursor-pointer" style="accent-color: ${color}">
             </div>
          `;
     }).join("");
@@ -379,12 +535,55 @@ function renderGoals() {
     </div>`;
 }
 
-window.toggleGoal = (id) => { state.goals = state.goals.map(g => g.id === id ? {...g, done: !g.done} : g); render(); };
-window.removeGoal = (id) => { state.goals = state.goals.filter(g => g.id !== id); toast('Goal removed', 'info'); render(); };
-window.addGoal = () => { 
-    if(!state.goalsForm.text.trim()) return; 
-    state.goals.push({id: Date.now(), text: state.goalsForm.text, done: false}); 
-    state.goalsForm.text = ''; state.goalsForm.modalOpen = false; toast('Goal added!'); render(); 
+window.toggleGoal = async (id) => {
+    const goal = state.goals.find(g => g.id === id);
+    if (!goal) return;
+    const newDone = !goal.done;
+    // Optimistic UI update
+    state.goals = state.goals.map(g => g.id === id ? {...g, done: newDone} : g);
+    render();
+    try {
+        await apiCall('PATCH', `/goals/${id}`, { done: newDone });
+    } catch (err) {
+        // Revert on failure
+        state.goals = state.goals.map(g => g.id === id ? {...g, done: !newDone} : g);
+        toast('Failed to update goal', 'error');
+        render();
+    }
+};
+
+window.removeGoal = async (id) => {
+    const removed = state.goals.find(g => g.id === id);
+    state.goals = state.goals.filter(g => g.id !== id);
+    toast('Goal removed', 'info');
+    render();
+    try {
+        await apiCall('DELETE', `/goals/${id}`);
+    } catch (err) {
+        // Revert on failure
+        if (removed) state.goals.push(removed);
+        toast('Failed to delete goal', 'error');
+        render();
+    }
+};
+
+window.addGoal = async () => {
+    if (!state.goalsForm.text.trim()) return;
+    const text = state.goalsForm.text.trim();
+    state.goalsForm.text = '';
+    state.goalsForm.modalOpen = false;
+    render();
+    try {
+        const data = await apiCall('POST', '/goals', { text });
+        if (data.goal) state.goals.unshift({ id: data.goal.id, text: data.goal.text, done: data.goal.done });
+        toast('Goal added! 🎯');
+        render();
+    } catch (err) {
+        // Fallback: add locally
+        state.goals.unshift({ id: Date.now().toString(), text, done: false });
+        toast('Goal added (offline mode)', 'info');
+        render();
+    }
 };
 
 function renderPlanner() {
@@ -434,10 +633,21 @@ function renderPlanner() {
     </div>`;
 }
 
-window.addSession = () => {
-    if(!state.plannerForm.date) return toast('Pick a date', 'error');
-    state.sessions.push({...state.plannerForm, duration: Number(state.plannerForm.duration)});
-    state.plannerForm.modalOpen = false; toast('Session added'); render();
+window.addSession = async () => {
+    if (!state.plannerForm.date) return toast('Pick a date', 'error');
+    const { date, subject, duration } = state.plannerForm;
+    state.plannerForm.modalOpen = false;
+    render();
+    try {
+        const data = await apiCall('POST', '/sessions', { date, subject, duration: Number(duration) });
+        if (data.session) state.sessions.unshift({ id: data.session.id, date, subject, duration: Number(duration) });
+        toast('Session logged! 📅');
+        render();
+    } catch (err) {
+        state.sessions.unshift({ id: Date.now().toString(), date, subject, duration: Number(duration) });
+        toast('Session added (offline mode)', 'info');
+        render();
+    }
 }
 
 function renderPractice() {
@@ -449,16 +659,55 @@ function renderPractice() {
     return `
     <div class="space-y-6 fade-up">
         <h2 class="text-lg font-bold text-slate-800 dark:text-white">Practice Zone</h2>
-        ${Card('p-5', `
-            <textarea id="practiceInput" placeholder="Enter problem..." rows="5" class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-white font-mono" oninput="state.practiceForm.input = this.value">${state.practiceForm.input}</textarea>
-            <div class="flex justify-end mt-3">${Button('gradient', '', 'onclick="submitPractice()"', '<i data-lucide="send" class="w-3 h-3"></i> Submit')}</div>
-        `)}
+        <div class="space-y-4 pt-2">
+            <div>
+                <label class="text-xs font-semibold text-slate-400 mb-2 block">SELECT SUBJECT</label>
+                <div class="grid grid-cols-3 gap-2">
+                    ${Object.keys(state.progress).map(s => `
+                        <button onclick="state.practiceForm.subject='${s}';render();" class="py-2.5 rounded-xl text-xs font-bold transition-all border ${state.practiceForm.subject === s ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-600/20':'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-500'}">${s}</button>
+                    `).join('')}
+                </div>
+            </div>
+            ${Card('p-1', `
+                <textarea id="practiceInput" placeholder="Enter your problem or code here..." rows="6" class="w-full px-4 py-3 rounded-xl border-none bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-white font-mono focus:ring-0" oninput="state.practiceForm.input = this.value">${state.practiceForm.input}</textarea>
+            `)}
+            <div class="flex justify-end pt-2">
+                ${Button('gradient', 'w-full sm:w-auto px-8', 'onclick="submitPractice()"', '<i data-lucide="zap" class="w-4 h-4"></i> Analyze & Submit')}
+            </div>
+        </div>
         ${warning}
     </div>`;
 }
-window.submitPractice = () => {
-    if(!state.practiceForm.input.trim()) return toast('Enter problem', 'error');
-    state.practiceForm.submitted = true; toast('Evaluation needs backend', 'info'); render();
+/**
+ * Submits practice input to the backend for evaluation.
+ */
+window.submitPractice = async () => {
+    const { input, subject = 'Coding' } = state.practiceForm;
+    if (!input || input.trim().length < 5) return toast('Input too short for evaluation', 'error');
+
+    try {
+        state.practiceForm.submitted = true;
+        render();
+
+        const data = await apiCall('POST', '/practice', { subject, input });
+        
+        showMilestone(
+            `Analysis Complete! Score: ${data.submission.score}%`, 
+            data.submission.feedback, 
+            data.submission.score > 70 ? 'award' : 'target'
+        );
+        
+        // Refresh dashboard to show new stats and progress
+        await loadAppData();
+        
+        state.practiceForm.input = '';
+        state.practiceForm.submitted = false;
+        render();
+    } catch (err) {
+        console.error('Practice submission failed:', err);
+        state.practiceForm.submitted = false;
+        render();
+    }
 }
 
 function renderQuotes() {
@@ -515,6 +764,12 @@ function renderProfile() {
                 <div><p class="font-bold text-lg dark:text-white">${u.name}</p><p class="text-sm text-slate-500">${u.email}</p></div>
             </div>
             ${mainContent}
+            <div class="mt-8 pt-6 border-t border-slate-100 dark:border-slate-800">
+                <button onclick="handleSignOut()" class="w-full py-4 text-red-500 font-bold bg-red-50 dark:bg-red-500/5 hover:bg-red-100 dark:hover:bg-red-500/10 rounded-2xl transition-all flex items-center justify-center gap-2 group">
+                    <i data-lucide="log-out" class="w-4 h-4 group-hover:-translate-x-1 transition-transform"></i>
+                    Sign Out Account
+                </button>
+            </div>
         `)}
         ${Card('p-5 mt-6', `
             <div class="flex items-center justify-between">
@@ -530,13 +785,33 @@ function renderProfile() {
 }
 window.editProfile = () => { state.profileForm = { ...state.profileForm, editing: true, name: state.user.name, email: state.user.email, skillLevel: state.user.skillLevel, interests: [...state.user.interests] }; render(); }
 window.cancelProfileEdit = () => { state.profileForm.editing = false; render(); }
-window.saveProfile = () => { state.user = { ...state.user, name: state.profileForm.name, email: state.profileForm.email, skillLevel: state.profileForm.skillLevel, interests: state.profileForm.interests }; state.profileForm.editing = false; toast('Profile updated'); render(); }
-window.toggleProfileInterest = (i) => { 
-    if(state.profileForm.interests.includes(i)) state.profileForm.interests = state.profileForm.interests.filter(x => x!==i);
+window.saveProfile = async () => {
+    state.user = { ...state.user, name: state.profileForm.name, email: state.profileForm.email, skillLevel: state.profileForm.skillLevel, interests: state.profileForm.interests };
+    state.profileForm.editing = false;
+    render();
+    try {
+        await apiCall('PATCH', '/profile', {
+            name: state.user.name,
+            skillLevel: state.user.skillLevel,
+            interests: state.user.interests,
+        });
+        toast('Profile updated! ✨');
+    } catch (err) {
+        toast('Profile saved locally (offline mode)', 'info');
+    }
+};
+
+window.toggleProfileInterest = (i) => {
+    if (state.profileForm.interests.includes(i)) state.profileForm.interests = state.profileForm.interests.filter(x => x !== i);
     else state.profileForm.interests.push(i);
     render();
-}
-window.toggleTheme = () => { state.theme = state.theme === 'dark' ? 'light' : 'dark'; render(); }
+};
+
+window.toggleTheme = async () => {
+    state.theme = state.theme === 'dark' ? 'light' : 'dark';
+    render();
+    try { await apiCall('PATCH', '/profile', { theme: state.theme }); } catch (_) {}
+};
 
 // --- Shell Sub-components --- //
 function renderSidebar(isMobile = false) {
@@ -578,7 +853,7 @@ function renderSidebar(isMobile = false) {
       </div>
       <nav class="flex-1 px-3 space-y-0.5 overflow-y-auto scrollbar-hide">${itemsHtml}</nav>
       <div class="p-3 border-t border-slate-200 dark:border-slate-800">
-        <button onclick="state.page='login'; render();" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-slate-500 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10 cursor-pointer">
+        <button onclick="handleSignOut()" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-slate-500 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10 cursor-pointer">
           <i data-lucide="log-out" class="w-4 h-4"></i> <span>Sign Out</span>
         </button>
       </div>
@@ -625,7 +900,31 @@ function renderNavbar() {
         </div>
     </header>`;
 }
-window.markAllRead = () => { state.notifications = state.notifications.map(n => ({...n, read:true})); render(); }
+window.markAllRead = async () => {
+    state.notifications = state.notifications.map(n => ({...n, read: true}));
+    render();
+    try { await apiCall('PATCH', '/notifications/read-all'); } catch (_) {}
+};
+
+// Progress slider with debounced API call (prevents flooding on drag)
+let _progressDebounceTimer = null;
+window.updateProgressSlider = (subject, value) => {
+    state.progress[subject] = value;
+    // Light DOM update — just the score label without full re-render
+    const scoreLabels = document.querySelectorAll(`[data-subject="${subject}"]`);
+    scoreLabels.forEach(el => el.textContent = `${value}%`);
+    // Debounced API call
+    clearTimeout(_progressDebounceTimer);
+    _progressDebounceTimer = setTimeout(async () => {
+        try {
+            await apiCall('PATCH', `/progress/${subject}`, { score: value });
+        } catch (err) {
+            console.warn('Progress update failed (offline):', err.message);
+        }
+        // Full re-render to update circular charts
+        render();
+    }, 600);
+};
 
 function renderAppLayout() {
     let sectionHtml = '';
@@ -694,10 +993,22 @@ function renderLoginPage() {
       </div>
     </div>`;
 }
-window.handleLogin = (e) => {
+window.handleLogin = async (e) => {
     e.preventDefault();
+    const { email, password } = state.loginForm;
+    if (!email || !password) return toast('Please enter email and password', 'error');
     state.loginForm.loading = true; render();
-    setTimeout(() => { state.loginForm.loading = false; toast('Welcome back!'); state.page = 'app'; render(); }, 800);
+    try {
+        await firebaseAuth.signInWithEmailAndPassword(email, password);
+        // onAuthStateChanged will handle the rest
+    } catch (err) {
+        state.loginForm.loading = false;
+        const msg = err.code === 'auth/user-not-found' ? 'No account found with this email' :
+                    err.code === 'auth/wrong-password' ? 'Incorrect password' :
+                    err.code === 'auth/invalid-email' ? 'Invalid email address' : err.message;
+        toast(msg, 'error');
+        render();
+    }
 };
 
 function renderSignupPage() {
@@ -719,10 +1030,34 @@ function renderSignupPage() {
       </div>
     </div>`;
 }
-window.handleSignup = (e) => {
+window.handleSignup = async (e) => {
     e.preventDefault();
+    const { name, email, password } = state.signupForm;
+    if (!name || !email || !password) return toast('All fields are required', 'error');
+    if (password.length < 6) return toast('Password must be at least 6 characters', 'error');
     state.signupForm.loading = true; render();
-    setTimeout(() => { state.signupForm.loading = false; state.user.name = state.signupForm.name || state.user.name; toast('Account created!'); state.page = 'app'; render(); }, 800);
+    try {
+        const cred = await firebaseAuth.createUserWithEmailAndPassword(email, password);
+        await cred.user.updateProfile({ displayName: name });
+        // Register user in Firestore via backend
+        try {
+            await apiCall('POST', '/auth/register', {
+                name,
+                skillLevel: state.signupForm.level || 'Beginner',
+                interests: state.signupForm.selectedInterests || [],
+            });
+        } catch (err) {
+            console.warn('Backend register call failed, proceeding anyway:', err.message);
+        }
+        // onAuthStateChanged will navigate to app
+    } catch (err) {
+        state.signupForm.loading = false;
+        const msg = err.code === 'auth/email-already-in-use' ? 'An account with this email already exists' :
+                    err.code === 'auth/invalid-email' ? 'Invalid email address' :
+                    err.code === 'auth/weak-password' ? 'Password is too weak' : err.message;
+        toast(msg, 'error');
+        render();
+    }
 }
 
 function renderForgotPage() {
@@ -742,12 +1077,71 @@ function renderForgotPage() {
       </div>
     </div>`;
 }
-window.handleForgot = (e) => {
+window.handleForgot = async (e) => {
     e.preventDefault();
-    setTimeout(() => { state.forgotForm.sent = true; toast('Reset link sent!'); render(); }, 500);
+    const emailInput = e.target.querySelector('input[type="email"]');
+    const email = emailInput ? emailInput.value : state.forgotForm.email;
+    if (!email) return toast('Please enter your email', 'error');
+    try {
+        await firebaseAuth.sendPasswordResetEmail(email);
+        state.forgotForm.sent = true;
+        toast('Password reset email sent!');
+        render();
+    } catch (err) {
+        const msg = err.code === 'auth/user-not-found' ? 'No account found with this email' : err.message;
+        toast(msg, 'error');
+    }
 }
 
-// Initial Boot
+// ============================================================
+// --- Firebase Auth State Listener (Boot) --- //
+// ============================================================
 document.addEventListener('DOMContentLoaded', () => {
+    // Show loading state while Firebase checks auth
+    state.page = 'login';
     render();
+
+    // Listen for Firebase auth state changes
+    firebaseAuth.onAuthStateChanged(async (firebaseUser) => {
+        if (firebaseUser) {
+            // Immediately populate basic info from Firebase Auth to satisfy "profile should match logged person"
+            state.user.email = firebaseUser.email;
+            state.user.name = firebaseUser.displayName || firebaseUser.email.split('@')[0];
+            
+            // User is logged in — load data and navigate to app
+            state.loginForm.loading = false;
+            state.signupForm.loading = false;
+            state.page = 'app';
+            render(); // Render app shell immediately with basic info
+
+            // Load real data from backend
+            await loadAppData();
+            render(); // Re-render with real data
+
+            // Show celebratory milstone on first entry of the session
+            if (!window.sessionStarted) {
+                showMilestone(`Welcome back, ${state.user.name}!`, "Your study momentum is waiting for you. Let's hit those goals today.", 'sparkles');
+                window.sessionStarted = true;
+            }
+        } else {
+            // User is logged out
+            state.page = 'login';
+            state.loginForm.loading = false;
+            state.signupForm.loading = false;
+            clearAppData();
+            render();
+        }
+    });
 });
+
+// Override sign-out to use Firebase
+window.handleSignOut = async () => {
+    try {
+        // Save theme preference before signing out
+        try { await apiCall('PATCH', '/profile', { theme: state.theme }); } catch (_) {}
+        await firebaseAuth.signOut();
+        // onAuthStateChanged will navigate to login
+    } catch (err) {
+        toast('Sign out failed', 'error');
+    }
+};
